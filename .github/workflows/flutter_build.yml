@@ -22,11 +22,12 @@ on:
 
 jobs:
   build:
+    name: Build Flutter APK
     runs-on: ubuntu-latest
     timeout-minutes: 30
     
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
       
       - name: Setup Java
@@ -40,59 +41,59 @@ jobs:
         with:
           flutter-version: '3.16.9'
           channel: 'stable'
+          cache: true
       
-      - name: Download ZIP (with verbose)
+      - name: Download ZIP file
         run: |
           echo "📥 Downloading from: ${{ inputs.zip_url }}"
-          curl -v -L -o project.zip "${{ inputs.zip_url }}"
+          curl -L -o project.zip "${{ inputs.zip_url }}"
+          
           if [ ! -f project.zip ]; then
-            echo "❌ Download failed - file not created!"
+            echo "❌ Download failed!"
             exit 1
           fi
-          echo "✅ Download success, size: $(du -h project.zip | cut -f1)"
-          file project.zip
+          
+          echo "✅ Download success! Size: $(du -h project.zip | cut -f1)"
           ls -la project.zip
       
       - name: Extract ZIP
         run: |
           echo "📦 Extracting..."
-          unzip -v project.zip | head -20
-          unzip -q project.zip
+          unzip -o project.zip -d extracted/
           rm project.zip
-          echo "=== Files after extract ==="
-          ls -la
+          ls -la extracted/
           
-          # Cari pubspec.yaml di semua lokasi
-          echo "=== Searching for pubspec.yaml ==="
-          find . -name "pubspec.yaml"
-      
-      - name: Move files if needed
-        run: |
-          # Kalau pubspec.yaml ada di subfolder, pindahin ke root
-          if [ ! -f "pubspec.yaml" ]; then
-            SUBDIR=$(find . -name "pubspec.yaml" -type f | head -1 | xargs dirname)
-            if [ -n "$SUBDIR" ] && [ "$SUBDIR" != "." ]; then
-              echo "📁 Moving files from $SUBDIR to root"
+          # Find pubspec.yaml (handles root or subfolder)
+          if [ -f "extracted/pubspec.yaml" ]; then
+            echo "✅ pubspec.yaml found in root"
+            mv extracted/* ./
+          else
+            SUBDIR=$(find extracted -name "pubspec.yaml" -type f | head -1 | xargs dirname)
+            if [ -n "$SUBDIR" ]; then
+              echo "✅ pubspec.yaml found in: $SUBDIR"
               mv $SUBDIR/* ./
-              mv $SUBDIR/.[!.]* ./ 2>/dev/null || true
+            else
+              echo "❌ pubspec.yaml not found anywhere!"
+              find extracted -name "*.yaml" | head -10
+              exit 1
             fi
           fi
           
+          rm -rf extracted
+          echo "=== Final structure ==="
           ls -la
       
-      - name: Check pubspec.yaml
+      - name: Verify Flutter project
         run: |
           if [ ! -f "pubspec.yaml" ]; then
             echo "❌ pubspec.yaml not found!"
-            echo "Current directory contents:"
-            ls -la
             exit 1
           fi
           echo "✅ pubspec.yaml found!"
           echo "First 10 lines:"
           head -10 pubspec.yaml
       
-      - name: Get Dependencies
+      - name: Clean and get dependencies
         run: |
           flutter clean
           flutter pub get
@@ -100,26 +101,52 @@ jobs:
       - name: Build APK
         run: |
           if [ "${{ inputs.build_type }}" = "debug" ]; then
+            echo "🔧 Building DEBUG APK..."
             flutter build apk --debug
           else
+            echo "🚀 Building RELEASE APK..."
             flutter build apk --release
           fi
       
-      - name: Find and Upload APK
+      - name: Find and prepare APK
+        id: apk
         run: |
-          APK_PATH=$(find build -name "*.apk" 2>/dev/null | head -1)
-          if [ -z "$APK_PATH" ]; then
-            echo "❌ No APK found!"
+          # Find APK file
+          APK_FILE=$(find build -name "*.apk" -type f 2>/dev/null | head -1)
+          
+          if [ -z "$APK_FILE" ]; then
+            echo "❌ No APK file found!"
+            echo "Build output:"
             find build -type f 2>/dev/null || echo "Build folder empty"
             exit 1
           fi
-          echo "✅ APK found: $APK_PATH"
-          cp "$APK_PATH" "app_${{ inputs.tag }}.apk"
-          echo "APK_FILE=app_${{ inputs.tag }}.apk" >> $GITHUB_ENV
+          
+          echo "✅ Found APK: $APK_FILE"
+          APK_SIZE=$(du -h "$APK_FILE" | cut -f1)
+          echo "📦 APK Size: $APK_SIZE"
+          
+          # Rename with tag
+          NEW_NAME="app_${{ inputs.tag }}_${{ inputs.build_type }}.apk"
+          cp "$APK_FILE" "$NEW_NAME"
+          echo "apk_name=$NEW_NAME" >> $GITHUB_OUTPUT
+          echo "✅ APK renamed to: $NEW_NAME"
       
-      - name: Upload Artifact
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-${{ inputs.tag }}
-          path: ${{ env.APK_FILE }}
+          name: flutter-apk-${{ inputs.tag }}
+          path: ${{ steps.apk.outputs.apk_name }}
           retention-days: 3
+          compression-level: 0
+      
+      - name: Build success notification
+        if: success()
+        run: |
+          echo "✅ Build completed successfully!"
+          echo "APK: ${{ steps.apk.outputs.apk_name }}"
+      
+      - name: Build failure notification
+        if: failure()
+        run: |
+          echo "❌ Build failed!"
+          echo "Check logs above for errors."
