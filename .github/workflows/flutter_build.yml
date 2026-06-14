@@ -1,1 +1,109 @@
-# buildapk
+name: Flutter APK Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'URL ZIP file project Flutter'
+        required: true
+        type: string
+      tag:
+        description: 'Build tag'
+        required: true
+        type: string
+      build_type:
+        description: 'Debug or Release'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - debug
+          - release
+
+jobs:
+  build:
+    name: Build Flutter APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Download project ZIP
+        run: |
+          echo "📥 Downloading ZIP from: ${{ inputs.zip_url }}"
+          curl -L -o project.zip "${{ inputs.zip_url }}"
+          ls -la project.zip
+
+      - name: Extract project
+        run: |
+          unzip -q project.zip -d ./project
+          ls -la ./project/
+          
+          if [ -f "./project/pubspec.yaml" ]; then
+            echo "✅ pubspec.yaml found in root"
+            mv ./project/* ./
+          else
+            SUBDIR=$(find ./project -maxdepth 2 -name "pubspec.yaml" -printf "%h\n" | head -1)
+            if [ -n "$SUBDIR" ]; then
+              echo "✅ pubspec.yaml found in: $SUBDIR"
+              mv $SUBDIR/* ./
+            else
+              echo "❌ pubspec.yaml not found!"
+              exit 1
+            fi
+          fi
+          
+          rm -rf ./project
+
+      - name: Get dependencies
+        run: |
+          flutter clean
+          flutter pub get
+
+      - name: Build APK
+        run: |
+          if [ "${{ inputs.build_type }}" = "debug" ]; then
+            flutter build apk --debug
+          else
+            flutter build apk --release
+          fi
+
+      - name: Locate and rename APK
+        run: |
+          if [ "${{ inputs.build_type }}" = "debug" ]; then
+            APK_PATH="build/app/outputs/flutter-apk/app-debug.apk"
+          else
+            APK_PATH="build/app/outputs/flutter-apk/app-release.apk"
+          fi
+          
+          if [ -f "$APK_PATH" ]; then
+            NEW_NAME="app_${{ inputs.tag }}_${{ inputs.build_type }}.apk"
+            cp "$APK_PATH" "$NEW_NAME"
+            echo "APK_FILE=$NEW_NAME" >> $GITHUB_ENV
+            echo "✅ APK: $NEW_NAME"
+          else
+            echo "❌ APK not found!"
+            exit 1
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-apk-${{ inputs.tag }}
+          path: ${{ env.APK_FILE }}
+          retention-days: 3
