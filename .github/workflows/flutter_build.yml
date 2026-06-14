@@ -33,29 +33,64 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '11'
+          java-version: '17'
       
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.13.9'
+          flutter-version: '3.16.9'
           channel: 'stable'
       
-      - name: Download ZIP
+      - name: Download ZIP (with verbose)
         run: |
-          curl -L -o project.zip "${{ inputs.zip_url }}"
+          echo "📥 Downloading from: ${{ inputs.zip_url }}"
+          curl -v -L -o project.zip "${{ inputs.zip_url }}"
+          if [ ! -f project.zip ]; then
+            echo "❌ Download failed - file not created!"
+            exit 1
+          fi
+          echo "✅ Download success, size: $(du -h project.zip | cut -f1)"
+          file project.zip
+          ls -la project.zip
+      
+      - name: Extract ZIP
+        run: |
+          echo "📦 Extracting..."
+          unzip -v project.zip | head -20
           unzip -q project.zip
           rm project.zip
+          echo "=== Files after extract ==="
+          ls -la
+          
+          # Cari pubspec.yaml di semua lokasi
+          echo "=== Searching for pubspec.yaml ==="
+          find . -name "pubspec.yaml"
+      
+      - name: Move files if needed
+        run: |
+          # Kalau pubspec.yaml ada di subfolder, pindahin ke root
+          if [ ! -f "pubspec.yaml" ]; then
+            SUBDIR=$(find . -name "pubspec.yaml" -type f | head -1 | xargs dirname)
+            if [ -n "$SUBDIR" ] && [ "$SUBDIR" != "." ]; then
+              echo "📁 Moving files from $SUBDIR to root"
+              mv $SUBDIR/* ./
+              mv $SUBDIR/.[!.]* ./ 2>/dev/null || true
+            fi
+          fi
+          
           ls -la
       
       - name: Check pubspec.yaml
         run: |
           if [ ! -f "pubspec.yaml" ]; then
             echo "❌ pubspec.yaml not found!"
+            echo "Current directory contents:"
+            ls -la
             exit 1
           fi
-          echo "✅ pubspec.yaml found"
-          cat pubspec.yaml | head -5
+          echo "✅ pubspec.yaml found!"
+          echo "First 10 lines:"
+          head -10 pubspec.yaml
       
       - name: Get Dependencies
         run: |
@@ -70,9 +105,21 @@ jobs:
             flutter build apk --release
           fi
       
-      - name: Upload APK
+      - name: Find and Upload APK
+        run: |
+          APK_PATH=$(find build -name "*.apk" 2>/dev/null | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ No APK found!"
+            find build -type f 2>/dev/null || echo "Build folder empty"
+            exit 1
+          fi
+          echo "✅ APK found: $APK_PATH"
+          cp "$APK_PATH" "app_${{ inputs.tag }}.apk"
+          echo "APK_FILE=app_${{ inputs.tag }}.apk" >> $GITHUB_ENV
+      
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-${{ inputs.tag }}
-          path: build/app/outputs/flutter-apk/*.apk
+          path: ${{ env.APK_FILE }}
           retention-days: 3
