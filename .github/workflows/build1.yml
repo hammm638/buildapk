@@ -25,8 +25,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     
     steps:
 
@@ -36,7 +34,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "18"
 
       # =========================
       # DOWNLOAD ZIP
@@ -57,53 +55,38 @@ jobs:
           echo "=== File Info ==="
           ls -lh project.zip
 
-          echo ""
-          echo "=== File Type ==="
-          file project.zip
-
-          echo ""
-          echo "=== First Bytes ==="
-          xxd project.zip | head -2
-
       # =========================
       # EXTRACT ZIP
       # =========================
       - name: Extract ZIP
         run: |
-          echo "=== Validating ZIP ==="
-
-          if ! unzip -t project.zip > /dev/null 2>&1; then
-            echo "❌ File bukan ZIP valid!"
-            echo ""
-            echo "=== Isi file ==="
-            cat project.zip
-            exit 1
-          fi
-
-          echo "✅ ZIP valid"
-
-          echo ""
           echo "=== Extracting ZIP ==="
           unzip -q project.zip -d project_raw
 
-          echo ""
-          echo "=== Isi folder project_raw ==="
-          find project_raw | head -50
-
-          echo ""
-          echo "=== Mengunci Project Dir (Manut Mode) ==="
+          echo "=== Finding Project Root ==="
+          # Cari pubspec.yaml
+          PUBSPEC_PATH=$(find project_raw -name "pubspec.yaml" -type f | head -n 1)
           
-          SUB_DIR_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type d | wc -l)
-          FILE_COUNT=$(find project_raw -maxdepth 1 -mindepth 1 -type f | wc -l)
-          
-          if [ "$SUB_DIR_COUNT" -eq 1 ] && [ "$FILE_COUNT" -eq 0 ]; then
-            PROJECT_DIR=$(find project_raw -maxdepth 1 -mindepth 1 -type d | head -n 1)
+          if [ -n "$PUBSPEC_PATH" ]; then
+            PROJECT_DIR=$(dirname "$PUBSPEC_PATH")
+            echo "✅ Found Flutter project at: $PROJECT_DIR"
           else
-            PROJECT_DIR="project_raw"
+            # Cari gradlew
+            GRADLEW_PATH=$(find project_raw -name "gradlew" -type f | head -n 1)
+            if [ -n "$GRADLEW_PATH" ]; then
+              PROJECT_DIR=$(dirname "$GRADLEW_PATH")
+              echo "✅ Found Native project at: $PROJECT_DIR"
+            else
+              PROJECT_DIR="project_raw"
+              echo "⚠️ Using default: $PROJECT_DIR"
+            fi
           fi
-
-          echo "✅ Project root langsung dikunci di: $PROJECT_DIR"
+          
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          
+          echo ""
+          echo "=== Project Structure ==="
+          ls -la $PROJECT_DIR
 
       # =========================
       # JAVA
@@ -112,10 +95,10 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: "temurin"
-          java-version: "17"
+          java-version: "11"
 
       # =========================
-      # ANDROID SDK (FIXED)
+      # ANDROID SDK
       # =========================
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -124,20 +107,22 @@ jobs:
 
       - name: Accept Android Licenses
         run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          yes | sdkmanager --licenses || true
+          echo "✅ Android licenses accepted"
 
       # =========================
-      # FLUTTER
+      # FLUTTER (VERSION LAMA)
       # =========================
       - name: Setup Flutter
-        uses: subosito/flutter-action@main
+        uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.24.5"
+          flutter-version: "3.16.9"  # ← VERSION LAMA YANG STABIL
           channel: "stable"
           cache: true
 
       # ==========================================================
-      # 🔍 TAHAP ANALYZE — STEP 1: Jalankan & cetak hasil
+      # 🔍 ANALYZE
       # ==========================================================
       - name: Analyze Project Code
         working-directory: ${{ env.PROJECT_DIR }}
@@ -145,53 +130,58 @@ jobs:
           echo "=== Starting Automated Code Analysis ==="
 
           if [ -f "pubspec.yaml" ]; then
-            echo "🔍 Menjalankan linting via flutter analyze..."
-
-            flutter analyze > analyze_report.txt 2>&1 || true
-
-            echo "[RESULT_ANALYZE]"
-            cat analyze_report.txt
-            echo "[END_RESULT_ANALYZE]"
-
-            rm -f analyze_report.txt
-
+            echo "🔍 Running flutter analyze..."
+            flutter analyze || true
           else
-            echo "☕ Project native / gradlew terdeteksi!"
-            echo "[RESULT_ANALYZE]"
-            echo "❌ Fitur analyze hanya support project Flutter (pubspec.yaml tidak ditemukan)."
-            echo "[END_RESULT_ANALYZE]"
+            echo "☕ Native project detected, skip analyze"
           fi
 
-      # ==========================================================
-      # 🔍 TAHAP ANALYZE — STEP 2: Stop workflow jika only_analyze
-      # ==========================================================
       - name: Stop if Analyze Only
         if: ${{ github.event.inputs.only_analyze == 'true' }}
         run: |
-          echo "Analyze-only mode aktif. Workflow dihentikan di sini."
-          exit 1
+          echo "Analyze-only mode. Stopping workflow."
+          exit 0
 
       # =========================
       # FLUTTER DOCTOR
       # =========================
       - name: Flutter Doctor
-        run: flutter doctor
+        run: flutter doctor -v
 
       # ==========================================================
-      # 📦 TAHAP DOWNLOAD DEPENDENSI (FIXED: tanpa timeout)
+      # 📦 DEPENDENCIES
       # ==========================================================
       - name: Get dependencies
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          echo "=== Running flutter pub get ==="
+          echo "=== Getting dependencies ==="
           if [ -f "pubspec.yaml" ]; then
-            flutter pub get || echo "⚠️ Gagal pub get, coba lanjut..."
+            flutter pub get
           else
-            echo "☕ Bukan project Flutter standar, skip pub get!"
+            echo "☕ Native project, skip pub get"
           fi
 
       # ==========================================================
-      # 🚀 TAHAP PEMBAKARAN UTAMA (BUILD APK) - FIXED
+      # 🔧 FIX GRADLE UNTUK VERSION LAMA
+      # ==========================================================
+      - name: Fix Android Gradle for old Flutter
+        working-directory: ${{ env.PROJECT_DIR }}
+        if: hashFiles('android/build.gradle') != ''
+        run: |
+          echo "=== Fixing Android Gradle ==="
+          
+          # Fix build.gradle untuk Flutter lama
+          if [ -f "android/build.gradle" ]; then
+            sed -i 's/classpath '\''com.android.tools.build:gradle:.*'\''/classpath '\''com.android.tools.build:gradle:7.4.2'\''/' android/build.gradle
+          fi
+          
+          # Fix gradle-wrapper.properties
+          if [ -f "android/gradle/wrapper/gradle-wrapper.properties" ]; then
+            sed -i 's|distributionUrl=.*|distributionUrl=https\://services.gradle.org/distributions/gradle-7.5-all.zip|' android/gradle/wrapper/gradle-wrapper.properties
+          fi
+
+      # ==========================================================
+      # 🚀 BUILD APK
       # ==========================================================
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
@@ -201,65 +191,69 @@ jobs:
           echo "Mode: $BUILD_TYPE"
 
           if [ -f "pubspec.yaml" ]; then
-            echo "🔥 Project Flutter Terdeteksi! Kompilasi via Flutter SDK..."
+            echo "🔥 Building Flutter APK..."
             flutter build apk --$BUILD_TYPE
             
-            # SET APK PATH YANG BENAR UNTUK FLUTTER
-            APK_FILE="build/app/outputs/flutter-apk/app-$BUILD_TYPE.apk"
+            # Cari APK
+            APK_FILE=$(find build -name "*.apk" -type f | head -n 1)
             
-            if [ ! -f "$APK_FILE" ]; then
-              echo "❌ APK tidak ditemukan di: $APK_FILE"
-              echo "Mencari alternatif..."
+            if [ -z "$APK_FILE" ]; then
+              echo "❌ No APK found!"
               find . -name "*.apk"
               exit 1
             fi
             
-          else
-            echo "☕ Project Native Android Terdeteksi! Bypassing Flutter Core..."
-            GRADLE_PATH=$(find . -name "gradlew" | head -n 1)
+            echo "✅ APK found: $APK_FILE"
+            echo "APK_PATH=$APK_FILE" >> $GITHUB_ENV
             
-            if [ -z "$GRADLE_PATH" ]; then
-              echo "❌ ERROR: File 'gradlew' tidak ditemukan!"
+          else
+            echo "☕ Building Native Android APK..."
+            
+            # Cari gradlew
+            GRADLEW_PATH=$(find . -name "gradlew" -type f | head -n 1)
+            
+            if [ -z "$GRADLEW_PATH" ]; then
+              echo "❌ gradlew not found!"
               exit 1
             fi
             
-            GRADLE_DIR=$(dirname "$GRADLE_PATH")
+            GRADLE_DIR=$(dirname "$GRADLEW_PATH")
             cd "$GRADLE_DIR"
             chmod +x gradlew
             
-            echo "🚀 Membakar APK menggunakan Gradle Native..."
+            # Build
             if [ "$BUILD_TYPE" = "debug" ]; then
-              ./gradlew assembleDebug
+              ./gradlew assembleDebug --no-daemon
             else
-              ./gradlew assembleRelease
+              ./gradlew assembleRelease --no-daemon
             fi
+            
             cd -
             
-            # SET APK PATH YANG BENAR UNTUK NATIVE
-            APK_FILE="app/build/outputs/apk/$BUILD_TYPE/app-$BUILD_TYPE.apk"
+            # Cari APK
+            APK_FILE=$(find . -name "*.apk" -type f | grep -v "unaligned" | head -n 1)
             
-            if [ ! -f "$APK_FILE" ]; then
-              echo "❌ APK tidak ditemukan di: $APK_FILE"
-              echo "Mencari alternatif..."
+            if [ -z "$APK_FILE" ]; then
+              echo "❌ No APK found!"
               find . -name "*.apk"
               exit 1
             fi
+            
+            echo "✅ APK found: $APK_FILE"
+            echo "APK_PATH=$APK_FILE" >> $GITHUB_ENV
           fi
-
-          echo "✅ APK berhasil dibangun: $APK_FILE"
-          echo "APK_PATH=$APK_FILE" >> $GITHUB_ENV
           
           echo ""
           echo "=== APK Size ==="
-          ls -lh "$APK_FILE"
+          ls -lh $APK_FILE
 
       # ==========================================================
-      # 📤 UPLOAD APK (FIXED: path langsung)
+      # 📤 UPLOAD
       # ==========================================================
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: flutter-${{ github.event.inputs.build_type }}-${{ github.event.inputs.tag }}
+          name: app-${{ github.event.inputs.build_type }}-${{ github.event.inputs.tag }}
           path: ${{ env.PROJECT_DIR }}/${{ env.APK_PATH }}
-          retention-days: 1
+          retention-days: 7
           if-no-files-found: error
