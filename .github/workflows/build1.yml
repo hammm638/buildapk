@@ -25,7 +25,7 @@ jobs:
     
     steps:
       # =========================
-      # DOWNLOAD ZIP DARI RELEASE
+      # DOWNLOAD ZIP DENGAN RETRY & VALIDASI
       # =========================
       - name: Download ZIP from Release
         run: |
@@ -35,11 +35,49 @@ jobs:
           echo "URL: ${{ github.event.inputs.zip_url }}"
           echo ""
           
-          # Download ZIP tanpa auth (karena public release)
-          curl -L \
-            -o project.zip \
-            -w "HTTP Status: %{http_code}\n" \
-            "${{ github.event.inputs.zip_url }}"
+          # Download dengan retry mechanism
+          for i in 1 2 3; do
+            echo "Attempt $i..."
+            
+            HTTP_CODE=$(curl -L \
+              -o project.zip \
+              -w "%{http_code}" \
+              "${{ github.event.inputs.zip_url }}")
+            
+            echo "HTTP Status: $HTTP_CODE"
+            
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Download successful!"
+              break
+            elif [ "$HTTP_CODE" = "404" ]; then
+              echo "❌ File not found (404)!"
+              echo ""
+              echo "=== Possible causes: ==="
+              echo "1. Release has been deleted or expired"
+              echo "2. Wrong URL format"
+              echo "3. Release is private"
+              echo ""
+              echo "=== Check your release: ==="
+              echo "Go to: https://github.com/${{ github.repository }}/releases"
+              echo "Find your release and copy the download URL"
+              echo ""
+              echo "=== Correct URL format: ==="
+              echo "https://github.com/OWNER/REPO/releases/download/TAG/FILENAME.zip"
+              echo "OR"
+              echo "https://github.com/OWNER/REPO/archive/refs/tags/TAG.zip"
+              exit 1
+            else
+              echo "⚠️ Unexpected status: $HTTP_CODE"
+              if [ $i -eq 3 ]; then
+                echo "❌ Failed after 3 attempts!"
+                echo ""
+                echo "=== Response Content ==="
+                cat project.zip 2>/dev/null || echo "No content"
+                exit 1
+              fi
+              sleep 2
+            fi
+          done
           
           echo ""
           echo "========================================="
@@ -51,10 +89,11 @@ jobs:
           echo "========================================="
           echo "🔍 VALIDATE ZIP"
           echo "========================================="
-          if unzip -t project.zip > /dev/null 2>&1; then
-            echo "✅ ZIP valid!"
+          if file project.zip | grep -q "Zip archive"; then
+            echo "✅ ZIP file is valid!"
           else
-            echo "❌ ZIP invalid!"
+            echo "❌ Not a valid ZIP file!"
+            echo "File type: $(file project.zip)"
             exit 1
           fi
 
@@ -72,18 +111,12 @@ jobs:
           PROJECT_DIR=$(find project_raw -name "pubspec.yaml" -type f | head -n 1 | xargs dirname)
           
           if [ -z "$PROJECT_DIR" ]; then
-            # Coba cari di subfolder
-            PROJECT_DIR=$(find project_raw -maxdepth 2 -name "pubspec.yaml" -type f | head -n 1 | xargs dirname)
-          fi
-          
-          if [ -z "$PROJECT_DIR" ]; then
             PROJECT_DIR="project_raw"
             echo "⚠️ Using default: $PROJECT_DIR"
-          else
-            echo "✅ Project found at: $PROJECT_DIR"
           fi
           
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "✅ Project found at: $PROJECT_DIR"
           
           echo ""
           echo "========================================="
@@ -92,8 +125,11 @@ jobs:
           ls -la $PROJECT_DIR
           
           if [ -f "$PROJECT_DIR/pubspec.yaml" ]; then
-            echo ""
-            echo "📄 pubspec.yaml found!"
+            echo "✅ pubspec.yaml found!"
+          else
+            echo "❌ pubspec.yaml NOT found!"
+            echo "This is not a Flutter project!"
+            exit 1
           fi
 
       # =========================
@@ -160,14 +196,12 @@ jobs:
           flutter pub get
 
       # =========================
-      # CLEAN BUILD (FIX ENGINE ERROR)
+      # CLEAN BUILD
       # =========================
       - name: Clean Previous Build
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          echo "========================================="
-          echo "🧹 CLEANING PREVIOUS BUILD"
-          echo "========================================="
+          echo "🧹 Cleaning..."
           flutter clean || true
           rm -rf build/ || true
           echo "✅ Clean complete!"
@@ -182,21 +216,17 @@ jobs:
           echo "🔧 FIXING GRADLE"
           echo "========================================="
           
-          # Fix gradle-wrapper.properties
           if [ -f "android/gradle/wrapper/gradle-wrapper.properties" ]; then
             sed -i 's|distributionUrl=.*|distributionUrl=https\://services.gradle.org/distributions/gradle-7.5-all.zip|' android/gradle/wrapper/gradle-wrapper.properties
             echo "✅ gradle-wrapper.properties fixed!"
           fi
           
-          # Fix build.gradle
           if [ -f "android/build.gradle" ]; then
             sed -i 's/classpath '\''com.android.tools.build:gradle:.*'\''/classpath '\''com.android.tools.build:gradle:7.4.2'\''/' android/build.gradle
             echo "✅ build.gradle fixed!"
           fi
           
-          # Fix app/build.gradle
           if [ -f "android/app/build.gradle" ]; then
-            # Set minSdk, targetSdk, compileSdk
             sed -i 's/minSdkVersion .*/minSdkVersion 21/' android/app/build.gradle
             sed -i 's/targetSdkVersion .*/targetSdkVersion 33/' android/app/build.gradle
             sed -i 's/compileSdkVersion .*/compileSdkVersion 33/' android/app/build.gradle
@@ -204,7 +234,7 @@ jobs:
           fi
 
       # =========================
-      # BUILD APK (DENGAN VERBOSE LOG)
+      # BUILD APK
       # =========================
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
@@ -216,10 +246,8 @@ jobs:
           BUILD_TYPE="${{ github.event.inputs.build_type }}"
           echo "Mode: $BUILD_TYPE"
           
-          # Build dengan verbose
           flutter build apk --$BUILD_TYPE --verbose 2>&1 | tee build.log
           
-          # Cari APK
           APK_FILE=$(find . -name "*.apk" -type f | head -n 1)
           
           if [ -z "$APK_FILE" ]; then
