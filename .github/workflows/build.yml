@@ -120,7 +120,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@main
         with:
-          flutter-version: "3.41.9"
+          flutter-version: "3.16.9"
           channel: "stable"
           cache: true
 
